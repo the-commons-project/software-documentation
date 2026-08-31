@@ -61,9 +61,9 @@ Count only with `_summary=count`:
 }
 ```
 
-## Working with OMH Observations
+## Working with OMH / IEEE 1752 Observations
 
-OMH Observations are the primary data type in JHE and are stored natively in the system. They are read and written as FHIR R5 resources.
+Observations coded to the Open mHealth (`https://w3id.org/openmhealth`) or IEEE 1752 (`https://w3id.org/ieee1752`) systems are the primary data type in JHE and are stored natively in the system. They are read and written as FHIR R5 resources. JHE treats the two coding systems interchangeably — IEEE 1752 schemas are Open mHealth schemas that have completed the IEEE ballot, so an Observation coded to either takes the same native path. An Observation coded to anything else is stored opaquely as an [auxiliary resource](./fhir-engine.md) instead.
 
 ### Querying Observations
 
@@ -292,7 +292,7 @@ The same scoping parameters apply to `Group` (Study), `Device` (Data Source), `O
 
 ## Working with other resources
 
-Any FHIR resource type not natively modeled in JHE (such as `QuestionnaireResponse`, `Condition`, or `MedicationRequest`) can be stored and retrieved via the auxiliary resource store. Before uploading, a patient must register a **FHIR Source** that identifies the upstream system the data originates from.
+Any FHIR resource type not natively modeled in JHE (such as a non OMH/IEEE 1752 `Observation`, `QuestionnaireResponse`, `Condition`, or `MedicationRequest`) can be stored and retrieved via the auxiliary resource store. Before uploading, a patient must register a **FHIR Source** that identifies the upstream system the data originates from.
 
 ### Step 1: Register a FHIR Source
 
@@ -306,8 +306,7 @@ Accept: application/json
 ```json
 {
   "data_source": 70005,
-  "label": "Neptune MyChart",
-  "fhir_base_url": "https://fhir.neptune.org/api/FHIR/R4"
+  "label": "Neptune MyChart"
 }
 ```
 
@@ -319,7 +318,6 @@ Response:
   "patient": 40001,
   "dataSource": 70005,
   "label": "Neptune MyChart",
-  "fhirBaseUrl": "https://fhir.neptune.org/api/FHIR/R4",
   "lastUpdated": "2026-06-07T04:11:52.577605Z"
 }
 ```

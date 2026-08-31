@@ -56,7 +56,14 @@ MedicationRequest, AllergyIntolerance, lab Observations); each type is fetched a
 independently so one failure does not abort the rest. Because the EHR serves **R4** and JHE
 stores **R5**, each resource is POSTed to the [`/fhir-import/R4/` endpoint](./fhir/r4-import.md),
 which converts it via the HL7 cross-version maps and then runs the normal create - landing
-non-OMH resources in `FhirAuxResource`, linked to a `FhirSource` the patient registers on the fly.
+resources that are not OMH/IEEE-1752-coded Observations in `FhirAuxResource`, linked to a
+`FhirSource` the patient registers on the fly.
+
+Every Connect registers a **new** `FhirSource` — a source stores no endpoint and is identified by
+its pk, so there is nothing to match a previous run against, and nothing needs one: each source is
+its own identifier namespace, so a reconnect re-imports into a fresh namespace rather than
+colliding with the earlier one. The authorized server URL is kept in the source's `label`, its only
+human-facing handle.
 
 ## Hospital branding / selection (SMART App Launch 2.2)
 
@@ -67,8 +74,16 @@ A JHE invitation doesn't say which hospital the patient uses, so the connect pag
   `EhrBrand` (one per health system: `name`, `vendor`, unique `fhir_base_url` = the SMART
   `iss`, `npi`, `logo_url`) and `EhrBrandLocation` (one per facility: `name`, `address_text`,
   `city`, `state`, `postal_code`, FK to brand). Vendor-neutral by design - no Epic-only columns.
+- **Which facility the patient picked** is recorded on the `FhirSource` as a nullable
+  `ehr_brand_location` FK. It is **descriptive only**: every location of a brand shares one
+  `fhir_base_url`, so the connection itself cannot tell facilities apart — the field records the
+  patient's selection, not where the data came from, and must not be read as provenance. It is
+  null for a source that is not a supported EHR at a supported location. The picked id is held in
+  `sessionStorage` across the SMART redirect, because the server cannot re-derive it (an `iss`
+  identifies a brand, and a brand has many locations).
 - **Search API**: `GET /api/v1/patient-access/brands?q=&state=&postal=` (authenticated). `q`
-  matches facility name, city, or brand name. Returns facilities with the brand's `fhir_base_url`.
+  matches facility name, city, or brand name. Returns facilities with their `id` and the brand's
+  `fhir_base_url`.
 - **Selection**: picking a facility calls `FHIR.oauth2.authorize({ iss: <brand.fhir_base_url> })`.
   `fhir-client.js` discovers the authorize/token endpoints from
   `{iss}/.well-known/smart-configuration` - so JHE routes purely on the `iss`, never on
