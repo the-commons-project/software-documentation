@@ -24,8 +24,8 @@ It is **create-only** — `GET`/`PUT`/`PATCH`/`DELETE` return `405`.
 After conversion, each resource is handed to the inherited `FHIRResourceView._create`, so the R4
 path **reuses everything downstream unchanged**:
 
-- **mapped-vs-aux routing** — an OMH-coded `Observation` writes the `Observation` model; every
-  other resource (and every non-OMH `Observation`) lands in `FhirAuxResource`
+- **mapped-vs-aux routing** — an OMH- or IEEE-1752-coded `Observation` writes the `Observation`
+  model; every other resource (and every otherwise-coded `Observation`) lands in `FhirAuxResource`
   (see [fhir-engine doc](./fhir-engine.md));
 - **`X-JHE-FHIR-Source-ID` header** — required, exactly as for a normal write;
 - **R5 validation** against `fhir.resources`, and **JHE provenance stamping** on the aux row.
@@ -319,9 +319,13 @@ field loss is **reported, not silent** — see [Data-loss reporting](#data-loss-
 - **`evaluate`** (FHIRPath expression transform, `Subscription`-only) is not implemented.
 - **Primitive extensions** (the `_field` sibling objects) are not carried.
 - **Bundles are not atomic** (batch semantics; per-entry success/failure).
-- **Resource `id` length.** FHIR caps `id` at 64 chars and `fhir.resources` enforces it, so an
-  over-long upstream id (e.g. some Epic ids) is rejected by R5 validation — expected. Move it into an
-  `identifier` before import (the id space is JHE's own UUIDs anyway).
+- **Resource `id` length.** FHIR caps `id` at 64 chars, but an over-long upstream id (e.g. Epic's
+  "Unconstrained FHIR IDs") imports fine: the create moves every incoming `id` into an `identifier`
+  namespaced by the FhirSource before validation, and the id space is JHE's own UUIDs anyway.
+- **Re-importing a record already stored under the same source** is refused per entry with a
+  `409` `OperationOutcome` whose issue `code` is `duplicate` — a create never refreshes an
+  existing record. This does not fire on an ordinary EHR reconnect: each Connect registers a new
+  `FhirSource`, and uniqueness is scoped to one source.
 
 ## Testing
 

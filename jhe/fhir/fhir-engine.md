@@ -7,14 +7,14 @@ A small, config-driven engine that powers a FHIR R5 server over Django. The guid
 
 Concretely, the Django models hold:
 
-| FHIR resource  | Django model (JHE system)                                                   | Everything else → `FhirAuxResource` |
-| -------------- | --------------------------------------------------------------------------- | ----------------------------------- |
-| `Observation`  | `Observation` — **OMH only** (`code` system `https://w3id.org/openmhealth`) | any other / code-less Observation   |
-| `Device`       | `DataSource`                                                                | any other Device                    |
-| `Group`        | `Study`                                                                     | any other Group                     |
-| `Organization` | `Organization`                                                              | any other Organization              |
-| `Patient`      | `Patient`                                                                   | any other Patient                   |
-| `Practitioner` | `Practitioner`                                                              | any other Practitioner              |
+| FHIR resource  | Django model (JHE system)                                                                                              | Everything else → `FhirAuxResource` |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `Observation`  | `Observation` — **OMH / IEEE 1752 only** (`code` system `https://w3id.org/openmhealth` or `https://w3id.org/ieee1752`) | any other / code-less Observation   |
+| `Device`       | `DataSource`                                                                                                           | any other Device                    |
+| `Group`        | `Study`                                                                                                                | any other Group                     |
+| `Organization` | `Organization`                                                                                                         | any other Organization              |
+| `Patient`      | `Patient`                                                                                                              | any other Patient                   |
+| `Practitioner` | `Practitioner`                                                                                                         | any other Practitioner              |
 
 Both kinds of resource are declared in [core/fhir/fhir_config.json](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/core/fhir/fhir_config.json).
 A **mapped resource** is projected onto its Django model by a field mapping (read renders the
@@ -34,7 +34,12 @@ The config drives which backing store handles it, via two annotations:
   at the top level. Every entry (mapped and aux) must have one.
 - `__criteria` — only on a mapped resource that exposes *all* interactions (so it would otherwise
   never fall back to aux). It is a predicate on the incoming resource that routes a **create**
-  between the model and aux. Today only `Observation` uses it: `code=https://w3id.org/openmhealth|`.
+  between the model and aux. Its form is `<param>=<system>|<code>[,<system>|<code>...]`, where
+  comma-separated values **OR** as in a FHIR token search and an empty code part matches any code
+  in that system. Today only `Observation` uses it:
+  `code=https://w3id.org/openmhealth|,https://w3id.org/ieee1752|` — the two coding systems are
+  [interchangeable to JHE](#omh-and-ieee-1752-are-one-coding-space). An unrecognised expression
+  matches, so a misconfigured criteria never silently diverts data to the aux blob.
 
 Given a resource `R` with mapped interactions `M`, aux interactions `A`, and optional criteria `C`:
 
@@ -46,8 +51,9 @@ Given a resource `R` with mapped interactions `M`, aux interactions `A`, and opt
 
 With the shipped config, `Device`/`Group`/`Organization`/`Patient`/`Practitioner` are
 `read,search` against their model — so **all their writes fall through to `FhirAuxResource`** —
-and `Observation` is `*` with the OMH criteria, so an **OMH** Observation create writes the
-`Observation` model while **any other** Observation create lands in `FhirAuxResource`.
+and `Observation` is `*` with the OMH/IEEE criteria, so an **OMH- or IEEE-1752-coded**
+Observation create writes the `Observation` model while **any other** Observation create lands in
+`FhirAuxResource`.
 
 **Search never spans both stores.** A single query resolves to one table so that filtering and
 sorting push down to the database on that one table rather than merging two result sets in memory.
@@ -56,6 +62,28 @@ The client chooses which store with `_source`: a bare `GET /Group` returns the m
 `?_source=https://jupyterhealth.org/fhir/fhir-source/<id>` (one source) or
 `?_source:below=https://jupyterhealth.org/fhir/fhir-source/` (all imported). The same holds for
 every mapped type. (`read`/`update`/`delete` are single-table via id shape.)
+
+(omh-and-ieee-1752-are-one-coding-space)=
+
+### OMH and IEEE 1752 are one coding space
+
+The `Observation` criteria names **two** coding systems because JHE treats them as the same thing.
+IEEE 1752 schemas *are* Open mHealth schemas that have been through the IEEE workgroup and
+balloting process; that process takes about a year, so at any moment some OMH schemas have no
+balloted equivalent yet, and some balloted IEEE schemas have a newer OMH revision. A data
+contributor that only accepts formally standardized schemas will code to IEEE; one that wants
+the newest schema will code to OMH. Structurally they are the same data point.
+
+So an Observation coded to either system takes the mapped path in full — the value attachment is
+decoded, the code must be a known and consented scope, a `Device` is required — and
+[`code_to_schema`](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/core/utils.py)
+resolves the body schema from the code's own namespace prefix (`omh:` / `ieee:`), with the IEEE
+header schema used for both.
+
+**The two namespaces are accepted, not unified.** Consent, `StudyScopeRequest` scopes and the
+`code` search param all match on the full `system|code` pair, so the same measure consented under
+one namespace is *not* consented under the other, and a study requesting the OMH code will not
+match data sent with the IEEE code. Nothing maps equivalent codes across the two.
 
 ## Searching mapped resources: the normalized `fhir_search`
 
@@ -361,10 +389,30 @@ whole FHIR body in `fhir_data`, served with full CRUD and no computation. Key po
 - Writes are validated against `fhir.resources`; the incoming body (snake-cased by the camel-case
   parser) is re-camelized before validation/storage so `fhir_data` is valid FHIR.
 
-- On every write, two best-effort columns are populated from the body (both may be null):
+- **A create always creates.** `POST` is a FHIR create, not an upsert: the client's `id` is never
+  the resource's identity (the server assigns a UUID), and an existing record is never silently
+  refreshed. Re-posting a record already stored under the same source is refused with **`409`** and
+  an `OperationOutcome` whose issue `code` is `duplicate`, naming the row it collided with — the
+  caller decides whether to `PUT`/`PATCH` that row, skip it, or write to a different source.
+  Uniqueness is per `(fhir_source, resource_type, fhir_resource_id)`, enforced by a partial unique
+  constraint (rows with no upstream id are exempt and always create). It is a property of the
+  source, not of the create path: a `PUT`/`PATCH` that moves a row onto an upstream id a sibling
+  already holds is refused with the same `409`.
 
-  - `fhir_resource_id` ← the resource's own `id`;
-  - `patient_fhir_id` ← the referenced Patient id: the resource `id` itself when
+- **On create, the incoming `id` moves into an `identifier`** (`_extract_upstream_id` in
+  [core/views/fhir.py](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/core/views/fhir.py)), with `system` = the FhirSource's URI — the same value
+  `meta.source` carries, because an upstream id is only unique *within* the source it came from.
+  This holds for every id, which also accepts ids over FHIR's 64-char limit (Epic's "Unconstrained
+  FHIR IDs"): illegal in `id`, fine in an `identifier`, and `fhir_resource_id` has no length limit.
+  A resource type with **no `identifier` element at all** (`Provenance` among the configured aux
+  types; `Binary` is the usual example elsewhere) has nowhere to put it — `fhir.resources` forbids
+  extra fields — so the id leaves the body without being represented in it. Uniqueness is
+  unaffected: it is enforced on the `fhir_resource_id` column, not on the identifier.
+
+- On every write, two best-effort columns are populated (both may be null):
+
+  - `fhir_resource_id` ← the resource's own upstream `id`;
+  - `patient_fhir_id` ← the referenced Patient id: the resource's own id when
     `resourceType == Patient`, else the `Patient/<id>` in `subject.reference`, `patient.reference`,
     or `beneficiary.reference` (first match wins).
 
@@ -394,10 +442,17 @@ whole FHIR body in `fhir_data`, served with full CRUD and no computation. Key po
 ### FhirSource
 
 A `FhirSource` ([core/models/fhir_source.py](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/core/models/fhir_source.py)) is an upstream FHIR source
-a **patient registers for themselves** (fields: `patient`, `data_source`, `label`, `fhir_base_url`)
-before uploading FHIR resources. CRUD lives at `api/v1/fhir_sources` via
+a **patient registers for themselves** (fields: `patient`, `data_source`, `label`) before uploading
+FHIR resources. CRUD lives at `api/v1/fhir_sources` via
 [`FhirSourceViewSet`](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/core/views/fhir_source.py), scoped to the requesting patient (their `patient`
 is assigned server-side).
+
+A source is identified by its **pk** (machines) and its **label** (humans) — nothing else. It
+deliberately stores **no upstream endpoint**: a source may be a connected EHR, a one-off import
+unique to one patient, or any other FHIR speaker, so no field could generally answer "is this the
+same system?", and nothing needs one to. **Registration always creates** — reconnecting the same
+EHR simply makes another source. That is cheap and safe, because each source is its own identifier
+namespace, and upstream record ids are only ever unique within one.
 
 (metasource-discriminator-source-param)=
 
@@ -436,10 +491,12 @@ part in reads (it is write-only).
   correct FHIR element for "where a resource came from"; it is **single-valued** (one row → one
   source → one store, no multiplicity to disambiguate); and `_source` is a **standard**
   all-resource search param, so the routing is idiomatic rather than bespoke.
-- Imported URIs are **JHE-minted** (`.../fhir-source/<id>`), not the upstream `fhir_base_url`, so
-  they are homogeneous, collision-free (the pk is unique), and share one parent path — which is what
-  lets a single `_source:below=.../fhir-source/` mean "everything imported." A raw external base URL
-  would be none of those.
+- Imported URIs are **JHE-minted** (`.../fhir-source/<id>`), so they are homogeneous,
+  collision-free (the pk is unique), and share one parent path — which is what lets a single
+  `_source:below=.../fhir-source/` mean "everything imported." A raw external base URL would be
+  none of those, and a `FhirSource` does not carry one. The same URI is the `identifier.system`
+  an imported record's upstream id is stamped with, so provenance and record identity speak one
+  vocabulary.
 - The JHE-native constant sits **outside** the `.../fhir-source/` prefix, so the "all imported"
   `:below` query can never sweep native rows in. (`:below` on the bare `/fhir` or `/jhe` root is *not*
   a supported "native-only" query — the code routes on the exact `.../fhir-source/` prefix.)
@@ -490,10 +547,10 @@ A single view, [`FHIRResourceView`](https://github.com/jupyterhealth/jupyterheal
 e.g. `FHIR/R5/Patient`). It applies
 the routing table above, dispatching to the generic **mapped handler** (which translates the
 canonical search params into the model's `fhir_search` and renders each row through the config
-mapping; `ObservationHandler` subclasses it only for the Base64 serializer and OMH create) or the
+mapping; `ObservationHandler` subclasses it only for the Base64 serializer and the OMH/IEEE create) or the
 **aux handler**. The FHIR bundle batch stays at `POST` on the
 base (`FHIR/R5/`), served by [`FHIRBase`](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/core/views/fhir_base.py), which routes each Observation
-entry by the same OMH criteria. Domain and DRF exceptions are rendered as a FHIR `OperationOutcome`
+entry by the same code criteria. Domain and DRF exceptions are rendered as a FHIR `OperationOutcome`
 with the right status by `handle_exception`.
 
 ## Adding a resource
@@ -515,8 +572,11 @@ with the right status by `handle_exception`.
 
 - Engine/serializer shape: `FHIRPatientSerializerTests`, `FHIRObservationSerializerTests`
   ([tests/backend/test_model_methods.py](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/tests/backend/test_model_methods.py)).
-- Config validation: [tests/backend/test_fhir_config.py](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/tests/backend/test_fhir_config.py).
-- Routing, single-store `_source` selection, `meta.source` provenance stamping, aux CRUD,
+- Config validation and `__criteria` evaluation (OMH/IEEE both match, comma-OR, unrecognised
+  expression falls through to the mapped path):
+  [tests/backend/test_fhir_config.py](https://github.com/jupyterhealth/jupyterhealth-exchange/blob/main/tests/backend/test_fhir_config.py).
+- Routing (including the OMH- and IEEE-coded Observation creates that take the mapped path),
+  single-store `_source` selection, `meta.source` provenance stamping, aux CRUD,
   header-vs-`meta.source` write resolution (header wins), id-shape routing, and the US Core search
   params / `_sort` / `_summary` on both stores (token/identifier/code/string/reference/date filters,
   comma-OR vs repeat-AND, the JSONB builder, date sort, count summary):
