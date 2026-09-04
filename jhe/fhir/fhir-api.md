@@ -432,3 +432,40 @@ GET /FHIR/R5/QuestionnaireResponse/2d50b34d-b33c-4f47-a5e8-595764d51f53
 ```
 
 All reads return a FHIR `searchset` Bundle (or a single resource for an ID lookup).
+
+## Permissions
+
+Reads and writes are authorized differently, and a **patient** and a **practitioner** are held to different rules. This applies the same way to OMH/IEEE 1752 Observations and to auxiliary resources — there is one write guard, not two.
+
+### Reads
+
+A read has no role or permission requirement — only organization membership:
+
+- A **patient** sees only their own data.
+- A **practitioner** sees data belonging to any patient who shares an organization with them, across all of their organizations at once.
+
+### Writes (create / update / delete)
+
+A write additionally requires the actor to be authorized against the specific patient the data belongs to:
+
+- A **patient** may write only their own data (the `subject`/`FhirSource.patient` must be themselves). For an OMH/IEEE Observation, the code must also be one the patient has **consented** to share — i.e. requested by a study they are enrolled in and actively consented. Auxiliary resources carry no consent concept; ownership via a registered FHIR Source is the only check.
+
+- A **practitioner** may write a patient's data if they:
+
+  1. share an **organization** with the patient, and
+  1. hold the **`patient.manage_data`** permission in that organization (see Role required, below).
+
+  Consent plays no part in a practitioner-authored write. Consent is a patient's own control over who sees their data, not a constraint on a practitioner who is otherwise authorized to manage it — a practitioner with organization membership and the right role/permission can create, update, or delete an OMH/IEEE Observation of any code, or any auxiliary resource, regardless of what the patient has or hasn't consented to.
+
+### Role required
+
+Membership alone is not enough for a practitioner write — their role in the shared organization must carry `patient.manage_data`:
+
+| Role         | `patient.manage_data` |
+| ------------ | :-------------------: |
+| `super_user` |          ✅           |
+| `manager`    |          ✅           |
+| `member`     |          ✅           |
+| `viewer`     |          ❌           |
+
+A practitioner who only shares an organization with the patient but holds the `viewer` role — or no role at all — is refused with a `403`.
